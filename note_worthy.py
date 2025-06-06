@@ -1,5 +1,5 @@
 #===============================================================Note Worthy=====================================================================
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import (
                                 QApplication,
                                 QWidget,QPushButton,
@@ -7,13 +7,17 @@ from PySide6.QtWidgets import (
                                 QTextEdit, QPushButton,
                                 QFileDialog,QMessageBox,
                                 QLabel,QComboBox,
-                                QLineEdit,QSplitter
+                                QLineEdit,QTextBrowser
                                 )
 from PySide6.QtGui import QFont,QIcon
+from pathlib import Path
+from markdown import markdown
+import shelve
 import nltk
 from nltk.corpus import wordnet
 import sys
 import json
+
 
 # Download WordNet if not already downloaded
 nltk.download('wordnet')
@@ -21,21 +25,34 @@ nltk.download('wordnet')
 CONFIG_FILE = "config.json"  # File to store user preferences
 
 
-class SidebarMenu(QWidget):
+class NoteWorthy(QWidget):
     def __init__(self):
         super().__init__()
 
+       
 #===============================================================Main Layout=====================================================================
         self.main_layout = QHBoxLayout(self)
         self.setGeometry(100, 100, 600, 400)
         # self.setMinimumHeight(600)  
         self.setWindowTitle("Note Worthy")  
-        self.setWindowIcon(QIcon("my_icon.ico"))
+        self.setWindowIcon(QIcon("./my_icon.ico"))
 #===============================================================================================================================================
 #================================================================Text box=======================================================================
         self.text_edit = QTextEdit()
         self.text_edit.textChanged.connect(self.update_word_count)
+        self.text_edit.textChanged.connect(self. _md_formatter)
+        self.text_edit.textChanged.connect(self._restart_timer)
         self.text_edit.setPlaceholderText("Type your notes here...")
+
+        self.preview = QTextBrowser()      
+        self.md_mode = False
+
+        self.previous_text = True
+
+        self.typing_timer = QTimer()
+        self.typing_timer.setSingleShot(True)
+        self.typing_timer.timeout.connect(self._autosave)
+
 #===============================================================================================================================================
 #================================================================Sidebar Widget=================================================================
         self.sidebar = QWidget()
@@ -43,9 +60,9 @@ class SidebarMenu(QWidget):
         self.sidebar.setStyleSheet("background-color: #333;")
 #===============================================================================================================================================#===============================================================word count label===========================================================
         self.word_count_label = QLabel("Words: 0", self)
-        v_layout = QVBoxLayout()
-        v_layout.addWidget(self.text_edit)   
-        v_layout.addWidget(self.word_count_label)
+        self.v_layout = QVBoxLayout()
+        self.v_layout.addWidget(self.text_edit)   
+        self.v_layout.addWidget(self.word_count_label)
 #===============================================================================================================================================
 #===============================================================Dictionary======================================================================
         self.word_input = QLineEdit(self)
@@ -58,9 +75,9 @@ class SidebarMenu(QWidget):
         self.definition_output.setWordWrap(True)
         self.definition_output.setMinimumSize(14, 18)
 
-        v_layout.addWidget(self.word_input)
-        v_layout.addWidget(self.search_button)
-        v_layout.addWidget(self.definition_output)
+        self.v_layout.addWidget(self.word_input)
+        self.v_layout.addWidget(self.search_button)
+        self.v_layout.addWidget(self.definition_output)
 #===============================================================================================================================================
 #============================================================Sidebar Layout (Vertical)==========================================================
         self.sidebar_layout = QVBoxLayout(self.sidebar)
@@ -69,9 +86,12 @@ class SidebarMenu(QWidget):
 #===========================================================Toggle Button (Collapses Sidebar)===================================================
         self.toggle_btn = QPushButton("☰")  # Unicode for menu icon
         self.toggle_btn.setFixedSize(40, 40)
-        self.toggle_btn.clicked.connect(self.toggle_sidebar)
+        self.toggle_btn.clicked.connect(self._toggle_sidebar)
 #==============================================================================================================================================
 #====================================================================Sidebar Buttons============================================================
+        self.md_btn = QPushButton("Markdown ON")
+        self.md_btn.clicked.connect(self._add_browser)
+
         self.copy_button = QPushButton("copy")
         self.copy_button.clicked.connect(self.text_edit.copy)
 
@@ -104,7 +124,7 @@ class SidebarMenu(QWidget):
 
         self.font_size_box = QComboBox(self)
         self.font_size_box.addItems(["10", "12", "14", "16", "18", "20", "22", "24", "26"])
-        self.font_size_box.currentIndexChanged.connect(self.change_font_size)
+        self.font_size_box.currentIndexChanged.connect(self._change_font_size)
 #===============================================================================================================================================
 #============================================================List of side bar buttons===========================================================
         buttons = [
@@ -117,6 +137,7 @@ class SidebarMenu(QWidget):
                     self.undo_button,
                     self.clear_button,
                     self.save_button,
+                    self.md_btn,
                     self.exit
 
                  ]
@@ -129,19 +150,20 @@ class SidebarMenu(QWidget):
 #================================================================Add Widgets to Main Layout=====================================================
         self.main_layout.addWidget(self.sidebar)
         self.main_layout.addWidget(self.toggle_btn)  # Sidebar toggle button
-        self.main_layout.addLayout(v_layout)
+        self.main_layout.addLayout(self.v_layout)
        
         self.setLayout(self.main_layout)
 #===============================================================================================================================================
 #==============================================Load user preference (default: light mode)=======================================================
         # Load user preferences
-        self.is_dark_mode, self.font_size = self.load_preferences()
-        self.apply_theme()
-        self.set_font_size(self.font_size)
- 
+        self.is_dark_mode, self.font_size = self._load_preferences()
+        self._apply_theme()
+        self._set_font_size(self.font_size)
+
+        self._get_last_written()
 #===============================================================================================================================================
 #===================================================================Funtions====================================================================
-    def toggle_sidebar(self):
+    def _toggle_sidebar(self):
         """Toggle sidebar visibility."""
         if self.sidebar.isVisible():
             self.sidebar.hide()
@@ -156,14 +178,14 @@ class SidebarMenu(QWidget):
 
     def save_file(self):
         #Prompts the user for filename and location
-        file_name, _ = QFileDialog.getSaveFileName(self, "save file", "", "Text Files (*.txt);;(*.html);;(*.csv);;(*.py)") 
+        file_name, _ = QFileDialog.getSaveFileName(self, "save file", "", "Text Files (*.txt);;(*.html);;(*.csv);;(*.py);;(*.md)") 
 
         if file_name:
             with open(file_name, "w", encoding="utf-8") as file:
                 file.write(self.text_edit.toPlainText())
 
     def open_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "save file", "", "Text Files (*.txt);;(*.html);;(*.csv);;(*.py)")
+        file_name, _ = QFileDialog.getOpenFileName(self, "save file", "", "Text Files (*.txt);;(*.html);;(*.csv);;(*.py);;(*.md)")
 
         if file_name:
             with open(file_name, "r", encoding="utf-8") as file:
@@ -187,24 +209,26 @@ class SidebarMenu(QWidget):
             self.definition_output.setText(definitions)
         else:
             self.definition_output.setText("❌ No definition found.")
+       
 
     def update_word_count(self):
         text = self.text_edit.toPlainText()
         words_num = len(text.split())
         self.word_count_label.setText(f'Words: {str(words_num)}')
+        
 
     def theme(self):
         self.is_dark_mode = not self.is_dark_mode
-        self.apply_theme()
-        self.save_preferences()
+        self._apply_theme()
+        self._save_preferences()
 
-    def apply_theme(self):
+    def _apply_theme(self):
         if self.is_dark_mode:
-            self.dark_mode()
+            self._dark_mode()
         else:
-            self.light_mode()
+            self._light_mode()
 
-    def dark_mode(self):
+    def _dark_mode(self):
         self.setStyleSheet("""
             QTextEdit { background-color: #2e2e2e; color: white; border: 1px solid #555; }
             QLabel { color: white; }
@@ -213,7 +237,7 @@ class SidebarMenu(QWidget):
         """)
         self.theme_btn.setText("☀️ Light Mode")
 
-    def light_mode(self):
+    def _light_mode(self):
         """Apply light mode styles."""
         self.setStyleSheet("""
             QTextEdit { background-color: white; color: black; border: 1px solid gray; }
@@ -223,20 +247,21 @@ class SidebarMenu(QWidget):
         """)
         self.theme_btn.setText("🌙 Dark Mode")
 
-    def change_font_size(self):
+    def _change_font_size(self):
         """Change the font size when the user selects a new size."""
         selected_size = int(self.font_size_box.currentText())
-        self.set_font_size(selected_size)
-        self.save_preferences()  # Save font size selection
+        self._set_font_size(selected_size)
+        self._save_preferences()  # Save font size selection
     
-    def set_font_size(self, size):
+    def _set_font_size(self, size):
         """Apply the selected font size."""
         font = QFont("Arial", size)
         self.text_edit.setFont(font)
+        self.preview.setFont(font)
         self.font_size_box.setCurrentText(str(size))  # Ensure dropdown reflects the selection
 
     
-    def save_preferences(self):
+    def _save_preferences(self):
         """Save user preferences (theme & font size) to a JSON file."""
         data = {
             "dark_mode": self.is_dark_mode,
@@ -245,7 +270,7 @@ class SidebarMenu(QWidget):
         with open(CONFIG_FILE, "w") as file:
             json.dump(data, file)
 
-    def load_preferences(self):
+    def _load_preferences(self):
         """Load user preferences (theme & font size) from a JSON file."""
         try:
             with open(CONFIG_FILE, "r") as file:
@@ -254,13 +279,54 @@ class SidebarMenu(QWidget):
         except (FileNotFoundError, json.JSONDecodeError):
             return False, 14  # Default values if file is missing or corrupted
         
+    def _add_browser(self):
+        if  self.md_mode == False:
+            self.main_layout.addWidget(self.preview)
+            self.md_btn.setText("Markdown OFF")
+            self.md_mode = True
+        else:
+            index = self.main_layout.indexOf(self.preview)
+            item = self.main_layout.takeAt(index)
+            widget = item.widget()
+            if widget != None:
+                widget.setParent(None)
+            self.md_mode = False
+            self.md_btn.setText("Markdown ON")
+   
+    def _md_formatter(self):
+        md_text = self.text_edit.toPlainText()
+        html = markdown(md_text)
+        self.preview.setHtml(html)
+        
+    def _restart_timer(self):
+        self.typing_timer.start(1000)  # Waits 10 seconds after last keypress
+
+    def _autosave(self):
+        current_text = self.text_edit.toPlainText()
+        if current_text != getattr(self, "last_saved_text",""):
+            file = Path(__file__).parent / "temp.txt"
+            with open(file, "w", encoding="utf-8") as f:
+                f.write(current_text)
+            self.last_saved_text = current_text
+
+    def _get_last_written(self):
+        file = Path(__file__).parent / "temp.txt"
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.text_edit.setText(text)
+            self.previous_text = False
+        except FileNotFoundError:
+            return
+        
     def exit_button(self):
+        self.destroy()
         sys.exit()
 #===============================================================================================================================================
 #===========================================================Run Application====================================================================
 if __name__ == "__main__":
     app = QApplication([])
-    window = SidebarMenu()
+    window = NoteWorthy()
     window.show()
     app.exec()
 #===============================================================================================================================================

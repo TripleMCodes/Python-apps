@@ -24,6 +24,7 @@ Dark/Light Mode	Switch between cozy dark or clean light themes.
 Font Size Control	Choose from a range of font sizes from a dropdown.
 🚀 Getting Started
 🔧 Requirements
+Autosave 
 To run this app, you'll need Python and the following packages:
 
 pip install -r requirements.txt
