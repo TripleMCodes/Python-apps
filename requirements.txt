@@ -1,4 +1,0 @@
-requirements
-
-PySide6>=6.5
-nltk>=3.8
